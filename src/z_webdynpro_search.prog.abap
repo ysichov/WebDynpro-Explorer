@@ -1,0 +1,493 @@
+REPORT  z_code_scanner.
+
+TYPE-POOLS: abap, rs, slis, wdyrt.
+
+TABLES: wdy_ctlr_compo_key, rsplf_srv, sscrfields.
+
+CONSTANTS: c_fox      TYPE rsplf_srvtypenm VALUE '0RSPL_METHODULA',
+           c_type_wdy TYPE c VALUE '1',
+           c_type_fox TYPE c VALUE '2'.
+
+TYPES: BEGIN OF lty_comp,
+         component TYPE wdy_component_name,
+       END OF lty_comp.
+
+TYPES: BEGIN OF lty_fox,
+         srvnm TYPE rsplf_srvnm,
+       END OF lty_fox.
+
+TYPES: BEGIN OF lty_found,
+         type            TYPE char1,
+         component_name  TYPE wdy_ctlr_compo-component_name,
+         controller_name TYPE wdy_ctlr_compo-controller_name,
+         cmpname         TYPE wdy_ctlr_compo-cmpname,
+         srvnm           TYPE rsplf_srv-srvnm,
+         title           TYPE string,
+         line            TYPE string,
+         line_num        TYPE i,
+       END OF lty_found.
+
+DATA: gt_comp  TYPE TABLE OF lty_comp WITH HEADER LINE,
+      gt_fox   TYPE TABLE OF lty_fox WITH HEADER LINE,
+      gt_found TYPE TABLE OF lty_found WITH HEADER LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+  SELECTION-SCREEN COMMENT 1(23) twdy FOR FIELD s_wdyc.
+  SELECTION-SCREEN POSITION 30.
+  SELECT-OPTIONS: s_wdyc          FOR wdy_ctlr_compo_key-component_name DEFAULT 'Z*' SIGN I OPTION CP.
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+  SELECTION-SCREEN COMMENT 1(23) tfox FOR FIELD s_fox.
+  SELECTION-SCREEN POSITION 30.
+  SELECT-OPTIONS: s_fox           FOR rsplf_srv-srvnm.
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+  SELECTION-SCREEN COMMENT 1(23) tstr FOR FIELD p_strg.
+  SELECTION-SCREEN POSITION 30.
+  PARAMETERS: p_strg(80).
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+  SELECTION-SCREEN COMMENT 1(23) twdyp FOR FIELD p_wdyc.
+  SELECTION-SCREEN POSITION 30.
+  PARAMETERS: p_wdyc       TYPE char1 AS CHECKBOX DEFAULT 'X'.
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+  SELECTION-SCREEN COMMENT 1(23) tfoxp FOR FIELD p_fox.
+  SELECTION-SCREEN POSITION 30.
+  PARAMETERS: p_fox        TYPE char1 AS CHECKBOX DEFAULT ' '.
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN: FUNCTION KEY 1.
+
+CLASS lcl_app DEFINITION DEFERRED.
+DATA app TYPE REF TO lcl_app.
+
+LOAD-OF-PROGRAM.
+  CREATE OBJECT app TYPE ('LCL_APP').
+
+INITIALIZATION.
+  CALL METHOD app->('INITIALIZATION').
+
+AT SELECTION-SCREEN.
+  CALL METHOD app->('AT_SELECTION_SCREEN').
+
+START-OF-SELECTION.
+  CALL METHOD app->('START_OF_SELECTION').
+
+CLASS lcl_app DEFINITION.
+  PUBLIC SECTION.
+    METHODS initialization.
+    METHODS at_selection_screen.
+    METHODS start_of_selection.
+    METHODS alv_user_command IMPORTING
+                               i_ucomm    TYPE syucomm
+                               i_selfield TYPE slis_selfield. "#EC CALLED
+  PRIVATE SECTION.
+    METHODS get_data CHANGING VALUE(c_rc)   TYPE sysubrc.
+    "! Search in Web Dynpro components
+    METHODS search_wdy.
+    METHODS create_alvlist .
+    METHODS open_webdynpro IMPORTING VALUE(u_component_name)  TYPE wdy_ctlr_compo-component_name
+                                     VALUE(u_controller_name) TYPE wdy_ctlr_compo-controller_name
+                                     VALUE(u_method)          TYPE wdy_ctlr_compo-cmpname
+                                     VALUE(u_line)            TYPE i.
+    "! Find text in formulas FOX
+    METHODS search_fox .
+    METHODS open_fox_in_browser IMPORTING VALUE(u_srvnm)    TYPE rsplf_srvnm.
+ENDCLASS.
+
+FORM alv_user_command
+      USING i_ucomm TYPE syucomm
+            i_selfield TYPE slis_selfield.                  "#EC CALLED
+  app->alv_user_command(
+    i_ucomm    = i_ucomm
+    i_selfield = i_selfield ).
+ENDFORM.
+
+CLASS lcl_app IMPLEMENTATION.
+
+  METHOD at_selection_screen.
+    CASE sscrfields-ucomm.
+      WHEN 'FC01'.
+        CALL TRANSACTION 'CODE_SCANNER'.
+        CLEAR sscrfields-ucomm.
+    ENDCASE.
+  ENDMETHOD.
+
+  METHOD initialization.
+    twdy = 'Web Dynpro Component'.
+    tfox = 'Fox formulas'.
+    tstr = 'Search string'.
+    twdyp = 'Search in WebDynpro Components'.
+    tfoxp = 'Search in Fox formulas'.
+
+    sscrfields-functxt_01 = 'Run code_scanner'.
+  ENDMETHOD.
+
+  METHOD start_of_selection.
+    DATA: lv_rc          TYPE sysubrc.
+
+    get_data( CHANGING c_rc = lv_rc ).
+    IF lv_rc <> 0.
+      RETURN.
+    ENDIF.
+
+    search_wdy( ).
+    search_fox( ).
+
+    create_alvlist( ).
+  ENDMETHOD.
+
+  METHOD get_data.
+
+    CLEAR c_rc.
+
+    CLEAR: gt_comp, gt_fox, gt_found.
+    REFRESH: gt_comp[], gt_fox[], gt_found[].
+
+    IF p_wdyc = abap_true.
+      SELECT DISTINCT component_name
+        FROM wdy_component
+        INTO TABLE gt_comp                               "#EC CI_BYPASS
+        WHERE component_name IN s_wdyc.               "#EC CI_SGLSELECT
+    ENDIF.
+
+    IF p_fox = abap_true.
+      SELECT DISTINCT srvnm
+        FROM rsplf_srv
+        INTO TABLE gt_fox
+        WHERE srvnm IN s_fox
+          AND objvers = rs_c_objvers-active              "#EC CI_BYPASS
+          AND srvtypenm = c_fox.                      "#EC CI_SGLSELECT
+    ENDIF.
+
+    IF gt_comp[] IS INITIAL AND gt_fox[] IS INITIAL.
+      MESSAGE 'Data not selected' TYPE 'S'.
+      c_rc = 1.
+    ENDIF.
+  ENDMETHOD.                    " get_data
+
+  METHOD search_wdy .
+
+    TYPES: BEGIN OF lty_found_wdy_ex.
+             INCLUDE TYPE lty_found.
+    TYPES:   code_body TYPE wdy_ctlr_compo-code_body,
+           END OF lty_found_wdy_ex.
+
+    DATA: lv_search       TYPE string,
+          lt_found_wdy_ex TYPE TABLE OF lty_found_wdy_ex,
+          lt_lines        TYPE TABLE OF string,
+          ls_lines        LIKE LINE OF lt_lines,
+          lt_results      TYPE TABLE OF match_result. " WITH HEADER LINE.
+
+    FIELD-SYMBOLS: <ls_found_wdy_ex> TYPE lty_found_wdy_ex,
+                   <ls_result>       TYPE match_result.
+
+    CHECK gt_comp[] IS NOT INITIAL.
+
+    SELECT component_name controller_name cmpname code_body
+      FROM wdy_ctlr_compo
+      INTO CORRESPONDING FIELDS OF TABLE lt_found_wdy_ex
+      FOR ALL ENTRIES IN gt_comp
+      WHERE component_name = gt_comp-component.
+
+    LOOP AT lt_found_wdy_ex ASSIGNING <ls_found_wdy_ex>
+      WHERE code_body CS p_strg.
+
+      SPLIT <ls_found_wdy_ex>-code_body AT cl_abap_char_utilities=>cr_lf
+        INTO TABLE lt_lines.
+
+      IF p_strg IS NOT INITIAL.
+        FIND ALL OCCURRENCES OF p_strg IN TABLE lt_lines
+          IGNORING CASE
+          RESULTS lt_results.
+      ENDIF.
+
+      IF sy-subrc <> 0.
+        BREAK-POINT.
+        MESSAGE 'Internal error has occurred' TYPE 'E'.
+      ENDIF.
+      IF p_strg IS NOT INITIAL.
+        LOOP AT lt_results ASSIGNING <ls_result>.
+
+          CLEAR gt_found.
+          MOVE-CORRESPONDING <ls_found_wdy_ex> TO gt_found.
+
+          gt_found-type = c_type_wdy.
+          gt_found-line_num = <ls_result>-line.
+          READ TABLE lt_lines INDEX <ls_result>-line INTO gt_found-line.
+
+          CONCATENATE gt_found-component_name gt_found-controller_name gt_found-cmpname
+            INTO gt_found-title SEPARATED BY '/'.
+          CONCATENATE 'WDY:' gt_found-title INTO gt_found-title SEPARATED BY space.
+
+          APPEND gt_found TO gt_found.
+        ENDLOOP.
+      ELSE.
+        LOOP AT lt_lines INTO ls_lines.
+
+          CLEAR gt_found.
+          MOVE-CORRESPONDING <ls_found_wdy_ex> TO gt_found.
+
+          gt_found-type = c_type_wdy.
+          gt_found-line_num = sy-tabix."<ls_result>-line.
+          "READ TABLE lt_lines INDEX <ls_result>-line INTO gt_found-line.
+          gt_found-line = ls_lines.
+          CONCATENATE gt_found-component_name gt_found-controller_name gt_found-cmpname
+            INTO gt_found-title SEPARATED BY '/'.
+          CONCATENATE 'WDY:' gt_found-title INTO gt_found-title SEPARATED BY space.
+
+          APPEND gt_found TO gt_found.
+        ENDLOOP.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.                    " search_wdy
+
+  METHOD create_alvlist .
+
+    DATA: ls_layout     TYPE slis_layout_alv,
+          lt_all_events TYPE TABLE OF slis_alv_event,
+          lt_events     TYPE TABLE OF slis_alv_event,
+          ls_event      TYPE slis_alv_event,
+          lt_fieldcat   TYPE TABLE OF slis_fieldcat_alv.
+
+    FIELD-SYMBOLS: <ls_fieldcat>        TYPE slis_fieldcat_alv.
+
+* Initialize Layout for activity log
+    ls_layout-detail_popup         = abap_true.
+    ls_layout-detail_initial_lines = abap_true.
+    ls_layout-expand_all           = abap_true.
+    ls_layout-colwidth_optimize    = abap_true.
+    ls_layout-zebra                = abap_true.
+
+* Get possible events
+    CALL FUNCTION 'REUSE_ALV_EVENTS_GET'
+      EXPORTING
+        i_list_type = 0
+      IMPORTING
+        et_events   = lt_all_events[].
+
+* User-command for activity log
+    READ TABLE lt_all_events WITH KEY name = slis_ev_user_command
+               INTO ls_event.
+    IF sy-subrc = 0.
+      ls_event-form = 'ALV_USER_COMMAND'.
+      APPEND ls_event TO lt_events.
+    ENDIF.
+
+    APPEND INITIAL LINE TO lt_fieldcat ASSIGNING <ls_fieldcat>.
+    <ls_fieldcat>-fieldname = 'TITLE'.
+    <ls_fieldcat>-outputlen = 70.
+    <ls_fieldcat>-seltext_l = 'Address'.
+
+    APPEND INITIAL LINE TO lt_fieldcat ASSIGNING <ls_fieldcat>.
+    <ls_fieldcat>-fieldname = 'LINE_NUM'.
+    "<ls_fieldcat>-outputlen = .
+    <ls_fieldcat>-seltext_s = 'String Number'.
+
+    APPEND INITIAL LINE TO lt_fieldcat ASSIGNING <ls_fieldcat>.
+    <ls_fieldcat>-fieldname = 'LINE'.
+    <ls_fieldcat>-outputlen = 70.
+    <ls_fieldcat>-seltext_l = 'Text'.
+
+    CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+      EXPORTING
+        i_callback_program = sy-repid
+        is_layout          = ls_layout
+        it_fieldcat        = lt_fieldcat
+        i_save             = 'A'
+        it_events          = lt_events
+      TABLES
+        t_outtab           = gt_found[]
+      EXCEPTIONS
+        program_error      = 1
+        OTHERS             = 2.
+
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+              WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+  ENDMETHOD.                    " create_alvlist
+
+  METHOD alv_user_command.
+
+    "FIELD-SYMBOLS: <ls_line>            TYPE lty_found.
+
+    CHECK i_ucomm = '&IC1'.
+    READ TABLE gt_found INTO gt_found INDEX i_selfield-tabindex.
+    IF sy-subrc = 0.
+
+      CASE gt_found-type.
+        WHEN c_type_wdy.
+          open_webdynpro(
+            u_component_name  = gt_found-component_name
+            u_controller_name = gt_found-controller_name
+            u_method          = gt_found-cmpname
+            u_line            = gt_found-line_num ).
+        WHEN c_type_fox.
+          open_fox_in_browser( u_srvnm = gt_found-srvnm ).
+      ENDCASE.
+    ENDIF.
+
+  ENDMETHOD.                    "alv_user_command
+
+  METHOD open_webdynpro.
+
+    DATA: ls_cont_key    TYPE wdy_controller_key,
+          lv_include     TYPE program,
+          lt_map         TYPE wdyrt_line_info_tab_type, " WITH HEADER LINE,
+          lv_line        TYPE i,
+          lo_req         TYPE REF TO cl_wb_request,
+          lt_request_set TYPE swbm_wb_request_set.
+
+    ls_cont_key-component_name = u_component_name.
+    ls_cont_key-controller_name = u_controller_name.
+
+    CALL METHOD cl_wdy_wb_naming_service=>get_includename_for_controller
+      EXPORTING
+        p_controller       = ls_cont_key
+      RECEIVING
+        p_includename      = lv_include
+      EXCEPTIONS
+        no_generation_info = 1
+        OTHERS             = 2.
+
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                 WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+    CALL FUNCTION 'WDY_WB_GET_SOURCECODE_MAPPING'
+      EXPORTING
+        p_include    = lv_include
+      IMPORTING
+        p_map        = lt_map[]
+      EXCEPTIONS
+        import_error = 1
+        OTHERS       = 2.
+
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+              WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+    LOOP AT lt_map INTO DATA(ls_map) WHERE code-text = u_method. "#EC CI_SORTSEQ
+    ENDLOOP.
+
+    IF sy-subrc <> 0.
+      MESSAGE 'Method not found' TYPE 'I'.
+      RETURN.
+    ENDIF.
+
+    lv_line = ls_map-line + u_line - 1.
+
+    CALL FUNCTION 'WDY_WB_REQUEST_FOR_SOURCEPOS'
+      EXPORTING
+        p_include             = lv_include
+        p_line                = lv_line
+        p_operation           = 'DISPLAY'
+      IMPORTING
+        p_wb_request          = lo_req
+      EXCEPTIONS
+        no_corresponding_code = 1
+        OTHERS                = 2.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+              WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+    APPEND lo_req TO lt_request_set.
+
+    CALL METHOD cl_wb_startup=>start
+      EXPORTING
+        p_wb_request_set = lt_request_set.
+
+  ENDMETHOD.                    "open_webdynpro
+
+  METHOD search_fox .
+
+    DATA: lo_srv              TYPE REF TO cl_rsplfs_srv,
+          lt_param_set_rule   TYPE TABLE OF rsplfa_s_param_set_rule,
+          lt_param_tab        TYPE TABLE OF REF TO if_rsplfa_param_struc,
+          lv_methodula_string TYPE string,
+          lo_fline            TYPE REF TO if_rsplfa_param_elem,
+          lv_line             TYPE c LENGTH 60,
+          lt_forml            TYPE rspls_ts_forml,
+          lt_lines            TYPE TABLE OF string,
+          lt_results          TYPE TABLE OF match_result.
+
+    FIELD-SYMBOLS: <ls_param_set_rule> TYPE rsplfa_s_param_set_rule,
+                   <ls_param_tab>      TYPE REF TO if_rsplfa_param_struc,
+                   <ls_result>         TYPE match_result,
+                   <ls_forml>          TYPE rspls_s_forml.
+
+    LOOP AT gt_fox INTO gt_fox.
+
+      TRY.
+          lo_srv = cl_rsplfs_srv=>factory( gt_fox-srvnm ).
+        CATCH cx_rspls_msg_static_check .
+          MESSAGE e001(00) WITH 'Error cl_rsplfs_srv=>factory' gt_fox-srvnm.
+      ENDTRY.
+
+      lt_param_set_rule = lo_srv->if_rsplfa_srv~get_param_set_rules( ).
+      SORT lt_param_set_rule BY rulepos.
+
+      LOOP AT lt_param_set_rule ASSIGNING <ls_param_set_rule>.
+
+        " Get FOX coding from parameters
+        lt_param_tab = <ls_param_set_rule>-r_param_set->get_tab_param_struc( 'FORMULATAB' ).
+
+        CLEAR lv_methodula_string.
+        LOOP AT lt_param_tab ASSIGNING <ls_param_tab>.
+          lo_fline = <ls_param_tab>->get_comp_elem( 'FLINE' ).
+          lo_fline->get_value( IMPORTING e_value = lv_line ).
+          CONCATENATE lv_methodula_string lv_line INTO lv_methodula_string
+            RESPECTING BLANKS.
+        ENDLOOP.
+
+        " Convert FOX coding and get field catalog for parsing
+        lt_forml[] =  cl_rsplfc_formula=>string_to_forml_tab( lv_methodula_string ).
+
+        REFRESH lt_lines.
+        LOOP AT lt_forml ASSIGNING <ls_forml>.
+          APPEND <ls_forml>-fline TO lt_lines.
+        ENDLOOP.
+
+        " Find
+        FIND ALL OCCURRENCES OF p_strg IN TABLE lt_lines
+          IGNORING CASE
+          RESULTS lt_results.
+
+        CHECK sy-subrc = 0.
+
+        LOOP AT lt_results ASSIGNING <ls_result>.
+
+          CLEAR gt_found.
+
+          gt_found-type = c_type_fox.
+          gt_found-srvnm = gt_fox-srvnm.
+          gt_found-line_num = <ls_result>-line.
+
+          READ TABLE lt_lines INDEX <ls_result>-line INTO gt_found-line.
+
+          CONCATENATE 'FOX:' gt_fox-srvnm INTO gt_found-title SEPARATED BY space.
+          APPEND gt_found TO gt_found.
+        ENDLOOP.
+      ENDLOOP.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD open_fox_in_browser.
+
+    DATA: lv_iobjnm         TYPE sobj_name.
+
+    lv_iobjnm = u_srvnm.
+    cl_rspls_wdapp=>start_modeler( i_tlogo = rs_c_tlogo-planning_service
+                                   i_objnm = lv_iobjnm ).
+  ENDMETHOD.                    " open_fox_in_browser
+
+ENDCLASS.
